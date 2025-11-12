@@ -354,7 +354,7 @@ def _render_process_warning_pie(
         )
         .properties(height=320)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     st.caption(caption)
 
 
@@ -416,6 +416,7 @@ def render_process_priority(
     ontology: Dict[str, Any],
     *,
     top_n: int = 12,
+    hotspot_detail: Optional[pd.DataFrame] = None,
 ) -> None:
     st.markdown("#### 공정 문제 우선순위 (P-Score)")
     if priority_df.empty:
@@ -425,14 +426,12 @@ def render_process_priority(
     display_df = priority_df.head(top_n).copy()
     ontology_maps = _build_ontology_maps(ontology)
     problem_options = display_df["Problem_Item"].tolist()
-    if not problem_options:
-        st.info("표시할 문제 항목이 없습니다.")
-        return
     selected_problem = st.selectbox(
         "우선 해결할 문제 항목 선택",
         problem_options,
         index=0 if problem_options else None,
     )
+
     display_df["Is_Selected"] = np.where(
         display_df["Problem_Item"] == selected_problem, "선택", "기타"
     )
@@ -472,98 +471,131 @@ def render_process_priority(
     )
     st.altair_chart(chart, width="stretch")
 
-    if selected_problem:
-        selected_row = display_df[
-            display_df["Problem_Item"] == selected_problem
-        ].iloc[0]
+    if not selected_problem:
+        return
 
-        metrics_cols = st.columns(4)
-        metrics_cols[0].metric("우선순위", f"{int(selected_row['Final_Rank'])}")
-        metrics_cols[1].metric(
-            "P-Score",
-            f"{selected_row['P_Score']:.2f}",
-            help="Real_Ratio × Rank_Score",
+    selected_row = display_df[display_df["Problem_Item"] == selected_problem].iloc[0]
+
+    metrics_cols = st.columns(4)
+    metrics_cols[0].metric("우선순위", f"{int(selected_row['Final_Rank'])}")
+    metrics_cols[1].metric(
+        "P-Score",
+        f"{selected_row['P_Score']:.2f}",
+        help="Real_Ratio × Rank_Score",
+    )
+    metrics_cols[2].metric(
+        "REAL 비율",
+        f"{selected_row['Real_Ratio']:.1%}",
+    )
+    metrics_cols[3].metric(
+        "샘플 수",
+        f"{int(selected_row['Sample_Size']):,}",
+        help="해당 항목에 포함된 결함 개수",
+    )
+
+    process_info = _lookup_ontology_entry(
+        ontology_maps,
+        entry_id=selected_row.get("Process_Id"),
+        entry_name=selected_row.get("Process_Name"),
+        entry_type="process",
+    )
+    zone_info = _lookup_ontology_entry(
+        ontology_maps,
+        entry_id=selected_row.get("Zone_Id"),
+        entry_name=selected_row.get("Zone_Name"),
+        entry_type="zone",
+    )
+    issue_info = _lookup_ontology_entry(
+        ontology_maps,
+        entry_id=selected_row.get("IssueType_Id"),
+        entry_name=selected_row.get("IssueType_Name"),
+        entry_type="issue",
+    )
+
+    st.markdown("##### 온톨로지 권고 및 진단 포인트")
+    description_lines: list[str] = []
+    if issue_info:
+        issue_name = issue_info.get("name", selected_row.get("IssueType_Name", ""))
+        issue_description = issue_info.get("description")
+        description_lines.append(f"- **이슈 유형:** {issue_name}")
+        if issue_description:
+            description_lines.append(f"  - {issue_description}")
+    if zone_info:
+        zone_name = zone_info.get("name", selected_row.get("Zone_Name", ""))
+        zone_description = zone_info.get("description")
+        description_lines.append(f"- **공간 영역:** {zone_name}")
+        if zone_description:
+            description_lines.append(f"  - {zone_description}")
+        related_causes = zone_info.get("related_causes")
+        if related_causes:
+            description_lines.append("  - 가능한 원인: " + ", ".join(related_causes))
+    if process_info:
+        proc_name = process_info.get("name", selected_row.get("Process_Name", ""))
+        proc_desc = process_info.get("description")
+        description_lines.append(f"- **공정:** {proc_name}")
+        if proc_desc:
+            description_lines.append(f"  - {proc_desc}")
+
+    if description_lines:
+        st.markdown("\n".join(description_lines))
+    else:
+        st.info("해당 항목에 대한 추가 온톨로지 설명이 없습니다.")
+
+    if issue_info and issue_info.get("recommended_initial_actions"):
+        st.markdown("**추천 초기 조치:**")
+        action_lines = "\n".join(
+            f"- {action}" for action in issue_info["recommended_initial_actions"]
         )
-        metrics_cols[2].metric(
-            "REAL 비율",
-            f"{selected_row['Real_Ratio']:.1%}",
-        )
-        metrics_cols[3].metric(
-            "샘플 수",
-            f"{int(selected_row['Sample_Size']):,}",
-            help="해당 항목에 포함된 결함 개수",
+        st.markdown(action_lines)
+
+    if process_info and process_info.get("critical_parameters"):
+        st.markdown("**관심 공정 파라미터:**")
+        st.markdown(
+            "\n".join(f"- {param}" for param in process_info["critical_parameters"])
         )
 
-        process_info = _lookup_ontology_entry(
-            ontology_maps,
-            entry_id=selected_row.get("Process_Id"),
-            entry_name=selected_row.get("Process_Name"),
-            entry_type="process",
-        )
-        zone_info = _lookup_ontology_entry(
-            ontology_maps,
-            entry_id=selected_row.get("Zone_Id"),
-            entry_name=selected_row.get("Zone_Name"),
-            entry_type="zone",
-        )
-        issue_info = _lookup_ontology_entry(
-            ontology_maps,
-            entry_id=selected_row.get("IssueType_Id"),
-            entry_name=selected_row.get("IssueType_Name"),
-            entry_type="issue",
+    if selected_row["Sample_Size"] < 50:
+        st.warning(
+            "샘플 수가 적은 항목입니다. 현장 데이터와 함께 추가 검증이 필요할 수 있습니다."
         )
 
-        st.markdown("##### 온톨로지 권고 및 진단 포인트")
-        description_lines = []
-        if issue_info:
-            issue_name = issue_info.get("name", selected_row.get("IssueType_Name", ""))
-            issue_description = issue_info.get("description")
-            description_lines.append(f"- **이슈 유형:** {issue_name}")
-            if issue_description:
-                description_lines.append(f"  - {issue_description}")
-            typical_classes = issue_info.get("typical_defect_classes")
-            if typical_classes:
-                class_text = ", ".join(map(str, typical_classes))
-                description_lines.append(
-                    f"  - 대표 결함 Class: {class_text}"
-                )
-        if zone_info:
-            zone_name = zone_info.get("name", selected_row.get("Zone_Name", ""))
-            zone_description = zone_info.get("description")
-            description_lines.append(f"- **공간 영역:** {zone_name}")
-            if zone_description:
-                description_lines.append(f"  - {zone_description}")
-        if process_info:
-            proc_name = process_info.get("name", selected_row.get("Process_Name", ""))
-            proc_desc = process_info.get("description")
-            description_lines.append(f"- **공정:** {proc_name}")
-            if proc_desc:
-                description_lines.append(f"  - {proc_desc}")
+    detail_candidates: Optional[pd.DataFrame] = None
+    if hotspot_detail is not None and not hotspot_detail.empty:
+        detail_candidates = hotspot_detail.copy()
+        step_mask = detail_candidates["Step_desc"] == selected_row["Step_desc"]
+        zone_id = selected_row.get("Zone_Id")
+        zone_name = selected_row.get("Zone_Name")
+        zone_mask = pd.Series(True, index=detail_candidates.index)
+        if zone_id is not None and pd.notna(zone_id):
+            zone_mask = detail_candidates["Zone_Id"] == zone_id
+        elif zone_name is not None and pd.notna(zone_name):
+            zone_mask = detail_candidates["Zone_Name"] == zone_name
+        detail_candidates = detail_candidates[step_mask & zone_mask]
+        if not detail_candidates.empty:
+            detail_candidates = detail_candidates.sort_values(
+                "P_Score", ascending=False
+            )
 
-        if description_lines:
-            st.markdown("\n".join(description_lines))
+    with st.expander("세부 Hotspot (1µm 단위)", expanded=False):
+        if detail_candidates is None or detail_candidates.empty:
+            st.info("선택한 공정에 대한 미세 Hotspot 데이터가 없습니다.")
         else:
-            st.info("해당 항목에 대한 추가 온톨로지 설명이 없습니다.")
-
-        if issue_info and issue_info.get("recommended_initial_actions"):
-            st.markdown("**추천 초기 조치:**")
-            action_lines = "\n".join(
-                f"- {action}" for action in issue_info["recommended_initial_actions"]
-            )
-            st.markdown(action_lines)
-
-        if process_info and process_info.get("critical_parameters"):
-            st.markdown("**관심 공정 파라미터:**")
             st.markdown(
-                "\n".join(
-                    f"- {param}"
-                    for param in process_info["critical_parameters"]
-                )
+                "선택 공정에서 반복 검출되는 미세 영역입니다. "
+                "반경 구간이 좁을수록 특정 장비/패스에서의 오염 가능성이 높습니다."
             )
-
-        if selected_row["Sample_Size"] < 50:
-            st.warning(
-                "샘플 수가 적은 항목입니다. 현장 데이터와 함께 추가 검증이 필요할 수 있습니다."
+            st.dataframe(
+                detail_candidates.head(30)[
+                    [
+                        "Problem_Item",
+                        "Real_Ratio",
+                        "Rank_Score",
+                        "P_Score",
+                        "Sample_Size",
+                    ]
+                ],
+                hide_index=True,
+                width="stretch",
             )
 
     st.dataframe(
@@ -808,7 +840,7 @@ def render_lot_detail(
             )
             .properties(height=300)
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     col1, col2, col3 = st.columns(3)
     col1.metric(
@@ -964,9 +996,19 @@ def main() -> None:
             filtered_prediction["Lot Name"].isin(lot_mask)
         ]
 
-    derived_priority = compute_process_priority_scores(filtered_labelled)
-    if not derived_priority.empty:
-        filtered_priority = derived_priority
+    summary_priority = compute_process_priority_scores(
+        filtered_labelled,
+        include_hotspots=False,
+    )
+    hotspot_detail = compute_process_priority_scores(
+        filtered_labelled,
+        include_hotspots=True,
+        window_size=1.0,
+        min_window_samples=5,
+    )
+    hotspot_detail = hotspot_detail[hotspot_detail["Category"] == "Hotspot"]
+    if not summary_priority.empty:
+        filtered_priority = summary_priority
 
     render_summary(filtered_prediction, warning_threshold, severity_threshold)
     render_process_warning_overview(
@@ -1121,7 +1163,11 @@ def main() -> None:
 
     with tabs[2]:
         st.markdown("### 온톨로지 기반 공정 우선순위")
-        render_process_priority(filtered_priority, ontology)
+        render_process_priority(
+            filtered_priority,
+            ontology,
+            hotspot_detail=hotspot_detail,
+        )
 
 
 if __name__ == "__main__":

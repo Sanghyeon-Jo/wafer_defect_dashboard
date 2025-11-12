@@ -292,13 +292,20 @@ def compute_process_priority_scores(
     *,
     inner_threshold: float = 0.33,
     middle_threshold: float = 0.66,
-    window_size: float = 200.0,
-    min_window_samples: int = 50,
+    include_hotspots: bool = False,
+    window_size: float = 300.0,
+    min_window_samples: int = 40,
 ) -> pd.DataFrame:
-    """Calculate process priority scores based on REAL defect distribution."""
+    """Calculate process priority scores based on REAL defect distribution.
+
+    When include_hotspots=False (default) the result focuses on Inner/Middle/Outer
+    영역 기반 요약을 제공하고, True로 설정하면 지정한 window_size로 세분화된
+    Hotspot 행이 추가되어 상세 분석에 활용할 수 있습니다.
+    """
 
     columns = [
         "Final_Rank",
+        "Step_desc",
         "Process_Id",
         "Process_Name",
         "Zone_Id",
@@ -434,82 +441,100 @@ def compute_process_priority_scores(
     )
     area_stats["Category"] = "Area"
 
-    df_local["Radius_Window_Start"] = (
-        np.floor(df_local["RADIUS"] / window_size) * window_size
-    )
-    df_local["Radius_Window_End"] = df_local["Radius_Window_Start"] + window_size
-
-    window_group_keys = [
-        "Step_desc",
-        "Radius_Window_Start",
-        "Radius_Window_End",
-    ]
-    window_aggs = (
-        df_local.groupby(window_group_keys, observed=False)
-        .agg(
-            Sample_Size=("Is_Real", "size"),
-            Real_Count=("Is_Real", "sum"),
-            Radius_Norm_Mean=("Radius_Norm", "mean"),
-        )
-        .reset_index()
-    )
-    window_aggs = window_aggs[window_aggs["Sample_Size"] >= min_window_samples]
-    if not window_aggs.empty:
-        window_aggs["Real_Ratio"] = window_aggs["Real_Count"] / (
-            window_aggs["Sample_Size"] + 1e-9
-        )
-    else:
-        window_aggs["Real_Ratio"] = pd.Series(dtype=float)
-
-    window_aggs["Problem_Item"] = window_aggs.apply(
-        lambda row: (
-            f"{row['Step_desc']} 웨이퍼 내 "
-            f"{int(row['Radius_Window_Start']):,}~{int(row['Radius_Window_End']):,} 영역"
-        ),
-        axis=1,
-    )
-
-    if not window_aggs.empty:
-        zone_pairs = list(window_aggs["Radius_Norm_Mean"].map(_zone_from_norm))
-        process_pairs = list(window_aggs["Step_desc"].map(_get_process_info))
-        window_aggs["Zone_Id"], window_aggs["Zone_Name"] = zip(*zone_pairs)
-        window_aggs["Process_Id"], window_aggs["Process_Name"] = zip(*process_pairs)
-    else:
-        window_aggs["Zone_Id"] = pd.Series(dtype=object)
-        window_aggs["Zone_Name"] = pd.Series(dtype=object)
-        window_aggs["Process_Id"] = pd.Series(dtype=object)
-        window_aggs["Process_Name"] = pd.Series(dtype=object)
-
-    window_aggs["IssueType_Id"] = window_aggs.apply(
-        lambda row: _resolve_issue_type(
-            row["Step_desc"], row.get("Zone_Id"), "Hotspot"
-        ),
-        axis=1,
-    )
-    window_aggs["IssueType_Name"] = window_aggs["IssueType_Id"].map(
-        lambda iid: issue_lookup.get(iid, {}).get("name", iid)
-    )
-    window_aggs["Rank_Score"] = window_aggs["IssueType_Id"].map(_issue_rank)
-    window_aggs["Sample_Size"] = window_aggs["Sample_Size"].astype(int)
-    window_aggs["Category"] = "Hotspot"
-    window_stats = window_aggs[
-        [
-            "Step_desc",
-            "Process_Id",
-            "Process_Name",
-            "Zone_Id",
-            "Zone_Name",
-            "IssueType_Id",
-            "IssueType_Name",
-            "Problem_Item",
-            "Real_Ratio",
-            "Rank_Score",
-            "Sample_Size",
-            "Category",
+    priority_frames = [
+        area_stats[
+            [
+                "Step_desc",
+                "Process_Id",
+                "Process_Name",
+                "Zone_Id",
+                "Zone_Name",
+                "IssueType_Id",
+                "IssueType_Name",
+                "Problem_Item",
+                "Real_Ratio",
+                "Rank_Score",
+                "Sample_Size",
+                "Category",
+            ]
         ]
     ]
 
-    priority_df = pd.concat([area_stats, window_stats], ignore_index=True)
+    if include_hotspots and window_size and window_size > 0:
+        df_local["Radius_Window_Start"] = (
+            np.floor(df_local["RADIUS"] / window_size) * window_size
+        )
+        df_local["Radius_Window_End"] = df_local["Radius_Window_Start"] + window_size
+
+        window_group_keys = [
+            "Step_desc",
+            "Radius_Window_Start",
+            "Radius_Window_End",
+        ]
+        window_aggs = (
+            df_local.groupby(window_group_keys, observed=False)
+            .agg(
+                Sample_Size=("Is_Real", "size"),
+                Real_Count=("Is_Real", "sum"),
+                Radius_Norm_Mean=("Radius_Norm", "mean"),
+            )
+            .reset_index()
+        )
+        window_aggs = window_aggs[window_aggs["Sample_Size"] >= min_window_samples]
+        if not window_aggs.empty:
+            window_aggs["Real_Ratio"] = window_aggs["Real_Count"] / (
+                window_aggs["Sample_Size"] + 1e-9
+            )
+
+            start_vals = window_aggs["Radius_Window_Start"].fillna(0).round().astype(int)
+            end_vals = window_aggs["Radius_Window_End"].fillna(0).round().astype(int)
+            window_aggs["Problem_Item"] = (
+                window_aggs["Step_desc"].astype(str)
+                + " 웨이퍼 내 "
+                + start_vals.map(lambda v: f"{v:,}")
+                + "~"
+                + end_vals.map(lambda v: f"{v:,}")
+                + " 영역"
+            )
+
+            zone_pairs = list(window_aggs["Radius_Norm_Mean"].map(_zone_from_norm))
+            process_pairs = list(window_aggs["Step_desc"].map(_get_process_info))
+            window_aggs["Zone_Id"], window_aggs["Zone_Name"] = zip(*zone_pairs)
+            window_aggs["Process_Id"], window_aggs["Process_Name"] = zip(*process_pairs)
+
+            window_aggs["IssueType_Id"] = window_aggs.apply(
+                lambda row: _resolve_issue_type(
+                    row["Step_desc"], row.get("Zone_Id"), "Hotspot"
+                ),
+                axis=1,
+            )
+            window_aggs["IssueType_Name"] = window_aggs["IssueType_Id"].map(
+                lambda iid: issue_lookup.get(iid, {}).get("name", iid)
+            )
+            window_aggs["Rank_Score"] = window_aggs["IssueType_Id"].map(_issue_rank)
+            window_aggs["Sample_Size"] = window_aggs["Sample_Size"].astype(int)
+            window_aggs["Category"] = "Hotspot"
+
+            priority_frames.append(
+                window_aggs[
+                    [
+                        "Step_desc",
+                        "Process_Id",
+                        "Process_Name",
+                        "Zone_Id",
+                        "Zone_Name",
+                        "IssueType_Id",
+                        "IssueType_Name",
+                        "Problem_Item",
+                        "Real_Ratio",
+                        "Rank_Score",
+                        "Sample_Size",
+                        "Category",
+                    ]
+                ]
+            )
+
+    priority_df = pd.concat(priority_frames, ignore_index=True, sort=False)
     if priority_df.empty:
         return pd.DataFrame(columns=columns)
 

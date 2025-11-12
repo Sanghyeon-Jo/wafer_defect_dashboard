@@ -16,7 +16,7 @@
     },
     {
       "id": "PC",
-      "name": "Photo Coat",
+      "name": "PC",
       "description": "Photoresist coating step",
       "default_issue_types": ["process_core", "handling"],
       "critical_parameters": ["Resist thickness", "Spin speed", "Bake temperature"]
